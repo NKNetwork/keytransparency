@@ -13,3 +13,5 @@ genfiles/*
 travis_secrets.tar.gz
 service_key.json
 client_secret*.json
+
+.DS_Store
