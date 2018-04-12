@@ -16,18 +16,10 @@ package p256
 
 import (
 	"bytes"
-	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"math"
 	"testing"
-
-	"github.com/golang/protobuf/proto"
-	"github.com/google/trillian/crypto/keys"
-	"github.com/google/trillian/crypto/keys/der"
-	"github.com/google/trillian/crypto/keyspb"
-
-	_ "github.com/google/trillian/crypto/keys/der/proto"
 )
 
 const (
@@ -74,76 +66,6 @@ func TestH2(t *testing.T) {
 	}
 }
 
-func TestNewFromWrappedKey(t *testing.T) {
-	ctx := context.Background()
-	for _, tc := range []struct {
-		desc               string
-		wantFromWrappedErr bool
-		spec               *keyspb.Specification
-		keygen             keys.ProtoGenerator
-	}{
-		{
-			desc: "DER with ECDSA spec",
-			spec: &keyspb.Specification{
-				Params: &keyspb.Specification_EcdsaParams{
-					EcdsaParams: &keyspb.Specification_ECDSA{
-						Curve: keyspb.Specification_ECDSA_P256,
-					},
-				},
-			},
-			keygen: func(ctx context.Context, spec *keyspb.Specification) (proto.Message, error) {
-				return der.NewProtoFromSpec(spec)
-			},
-		},
-		{
-			desc:               "DER with Non-ECDSA spec",
-			wantFromWrappedErr: true,
-			spec: &keyspb.Specification{
-				Params: &keyspb.Specification_RsaParams{
-					RsaParams: &keyspb.Specification_RSA{Bits: 2048},
-				},
-			},
-			keygen: func(ctx context.Context, spec *keyspb.Specification) (proto.Message, error) {
-				return der.NewProtoFromSpec(spec)
-			},
-		},
-	} {
-		t.Run(tc.desc, func(t *testing.T) {
-			// Generate VRF key.
-			wrapped, err := tc.keygen(ctx, tc.spec)
-			if err != nil {
-				t.Fatalf("keygen failed: %v", err)
-			}
-			vrfPriv, err := NewFromWrappedKey(ctx, wrapped)
-			if got, want := err != nil, tc.wantFromWrappedErr; got != want {
-				t.Errorf("NewFromWrappedKey (): %v, want err: %v", err, want)
-			}
-			if err != nil {
-				return
-			}
-
-			vrfPubDER, err := der.MarshalPublicKey(vrfPriv.Public())
-			if err != nil {
-				t.Fatalf("MarshalPublicKey failed: %v", err)
-			}
-			vrfPub, err := NewVRFVerifierFromRawKey(vrfPubDER)
-			if err != nil {
-				t.Fatalf("NewVRFVerifierFromRawKey(): %v", err)
-			}
-			// Test that the public and private components match.
-			m := []byte("foobar")
-			indexA, proof := vrfPriv.Evaluate(m)
-			indexB, err := vrfPub.ProofToHash(m, proof)
-			if err != nil {
-				t.Fatalf("ProofToHash(): %v", err)
-			}
-			if got, want := indexB, indexA; got != want {
-				t.Errorf("ProofToHash(%s, %x): %x, want %x", m, proof, got, want)
-			}
-		})
-	}
-}
-
 func TestVRF(t *testing.T) {
 	k, pk := GenerateKey()
 
@@ -157,28 +79,21 @@ func TestVRF(t *testing.T) {
 		m     []byte
 		index [32]byte
 		proof []byte
-		err   error
+		valid bool
 	}{
-		{m1, index1, proof1, nil},
-		{m2, index2, proof2, nil},
-		{m3, index3, proof3, nil},
-		{m3, index3, proof2, nil},
-		{m3, index3, proof1, ErrInvalidVRF},
+		{m1, index1, proof1, true},
+		{m2, index2, proof2, true},
+		{m3, index3, proof3, true},
+		{m3, index3, proof2, true},
+		{m3, index3, proof1, false},
 	} {
-		index, err := pk.ProofToHash(tc.m, tc.proof)
-		if got, want := err, tc.err; got != want {
-			t.Errorf("ProofToHash(%s, %x): %v, want %v", tc.m, tc.proof, got, want)
-		}
-		if err != nil {
-			continue
-		}
-		if got, want := index, tc.index; got != want {
-			t.Errorf("ProofToInex(%s, %x): %x, want %x", tc.m, tc.proof, got, want)
+		if valid := pk.Verify(tc.m, tc.proof); valid != tc.valid {
+			t.Errorf("Verify(%s, %x): %v, want %v", tc.m, tc.proof, valid, tc.valid)
 		}
 	}
 }
 
-func TestProofToHash(t *testing.T) {
+func TestVerify(t *testing.T) {
 	pk, err := NewVRFVerifierFromPEM([]byte(pubKey))
 	if err != nil {
 		t.Errorf("NewVRFSigner failure: %v", err)
@@ -205,13 +120,8 @@ func TestProofToHash(t *testing.T) {
 			proof: h2b("a907df20dcd190c10ab217db1c752ccf12817a221e43e99e6187e3d3848b803b991b7e474c120af45a46698724136a5691c189afdf73ab00033eb491849b44600447d0f7c330343720da2ae0959cfd2c3bda9083af475203efb07bcb2e18d12b99abf1a10001d355ae3f9a34c53052a70ff3af03024ad3ada1d188949a707376e6"),
 		},
 	} {
-		index, err := pk.ProofToHash(tc.m, tc.proof)
-		if err != nil {
-			t.Errorf("ProofToHash(%s, %x): %v, want nil", tc.m, tc.proof, err)
-			continue
-		}
-		if got, want := index, tc.index; got != want {
-			t.Errorf("ProofToHash(%s, %x): %x, want %x", tc.m, tc.proof, got, want)
+		if !pk.Verify(tc.m, tc.proof) {
+			t.Errorf("Verify(%s, %x): %v, want %v", tc.m, tc.proof, false, true)
 		}
 	}
 }
@@ -238,7 +148,7 @@ func TestReadFromOpenSSL(t *testing.T) {
 		// Evaluate and verify.
 		m := []byte("M")
 		_, proof := signer.Evaluate(m)
-		if _, err := verifier.ProofToHash(m, proof); err != nil {
+		if !verifier.Verify(m, proof) {
 			t.Errorf("Failed verifying VRF proof")
 		}
 	}
@@ -252,7 +162,7 @@ func TestRightTruncateProof(t *testing.T) {
 	proofLen := len(proof)
 	for i := 0; i < proofLen; i++ {
 		proof = proof[:len(proof)-1]
-		if _, err := pk.ProofToHash(data, proof); err == nil {
+		if pk.Verify(data, proof) {
 			t.Errorf("Verify unexpectedly succeeded after truncating %v bytes from the end of proof", i)
 		}
 	}
@@ -266,7 +176,7 @@ func TestLeftTruncateProof(t *testing.T) {
 	proofLen := len(proof)
 	for i := 0; i < proofLen; i++ {
 		proof = proof[1:]
-		if _, err := pk.ProofToHash(data, proof); err == nil {
+		if pk.Verify(data, proof) {
 			t.Errorf("Verify unexpectedly succeeded after truncating %v bytes from the beginning of proof", i)
 		}
 	}
@@ -279,7 +189,7 @@ func TestBitFlip(t *testing.T) {
 	_, proof := k.Evaluate(data)
 	for i := 0; i < len(proof)*8; i++ {
 		// Flip bit in position i.
-		if _, err := pk.ProofToHash(data, flipBit(proof, i)); err == nil {
+		if pk.Verify(data, flipBit(proof, i)) {
 			t.Errorf("Verify unexpectedly succeeded after flipping bit %v of vrf", i)
 		}
 	}
@@ -323,12 +233,8 @@ func TestVectors(t *testing.T) {
 		if got, want := index, tc.index; got != want {
 			t.Errorf("Evaluate(%s).Index: %x, want %x", tc.m, got, want)
 		}
-		index2, err := pk.ProofToHash(tc.m, proof)
-		if err != nil {
-			t.Errorf("ProofToHash(%s): %v", tc.m, err)
-		}
-		if got, want := index2, index; got != want {
-			t.Errorf("ProofToHash(%s): %x, want %x", tc.m, got, want)
+		if !pk.Verify(tc.m, proof) {
+			t.Errorf("Verify(%s): %v, want %v", tc.m, false, true)
 		}
 	}
 }
@@ -349,4 +255,23 @@ func h2b(h string) []byte {
 		panic("Invalid hex")
 	}
 	return b
+}
+
+func BenchmarkEvaluate(b *testing.B) {
+	sk, _ := GenerateKey()
+	alice := []byte("alice")
+	b.ResetTimer()
+	for n := 0; n < b.N; n++ {
+		sk.Evaluate(alice)
+	}
+}
+
+func BenchmarkVerify(b *testing.B) {
+	sk, pk := GenerateKey()
+	alice := []byte("alice")
+	_, aliceProof := sk.Evaluate(alice)
+	b.ResetTimer()
+	for n := 0; n < b.N; n++ {
+		pk.Verify(alice, aliceProof)
+	}
 }

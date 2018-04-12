@@ -22,7 +22,6 @@ package p256
 
 import (
 	"bytes"
-	"context"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -34,13 +33,7 @@ import (
 	"encoding/binary"
 	"encoding/pem"
 	"errors"
-	"fmt"
 	"math/big"
-
-	"github.com/google/keytransparency/core/crypto/vrf"
-	"github.com/google/trillian/crypto/keys"
-
-	"github.com/golang/protobuf/proto"
 )
 
 var (
@@ -68,7 +61,7 @@ type PrivateKey struct {
 }
 
 // GenerateKey generates a fresh keypair for this VRF
-func GenerateKey() (vrf.PrivateKey, vrf.PublicKey) {
+func GenerateKey() (*PrivateKey, *PublicKey) {
 	key, err := ecdsa.GenerateKey(curve, rand.Reader)
 	if err != nil {
 		return nil, nil
@@ -164,12 +157,11 @@ func (k PrivateKey) Evaluate(m []byte) (index [32]byte, proof []byte) {
 	return index, buf.Bytes()
 }
 
-// ProofToHash asserts that proof is correct for m and outputs index.
-func (pk *PublicKey) ProofToHash(m, proof []byte) (index [32]byte, err error) {
-	nilIndex := [32]byte{}
+// Verify asserts that proof is correct for m.
+func (pk *PublicKey) Verify(m, proof []byte) bool {
 	// verifier checks that s == H2(m, [t]G + [s]([k]G), [t]H1(m) + [s]VRF_k(m))
 	if got, want := len(proof), 64+65; got != want {
-		return nilIndex, ErrInvalidVRF
+		return false
 	}
 
 	// Parse proof into s, t, and vrf.
@@ -179,7 +171,7 @@ func (pk *PublicKey) ProofToHash(m, proof []byte) (index [32]byte, err error) {
 
 	uHx, uHy := elliptic.Unmarshal(curve, vrf)
 	if uHx == nil {
-		return nilIndex, ErrInvalidVRF
+		return false
 	}
 
 	// [t]G + [s]([k]G) = [t+ks]G
@@ -213,30 +205,13 @@ func (pk *PublicKey) ProofToHash(m, proof []byte) (index [32]byte, err error) {
 	buf.Write(h2.Bytes())
 
 	if !hmac.Equal(s, buf.Bytes()) {
-		return nilIndex, ErrInvalidVRF
+		return false
 	}
-	return sha256.Sum256(vrf), nil
-}
-
-// NewFromWrappedKey creates a VRF signer object from an encrypted private key.
-// The opaque private key must resolve to an `ecdsa.PrivateKey` in order to work.
-func NewFromWrappedKey(ctx context.Context, wrapped proto.Message) (vrf.PrivateKey, error) {
-	// Unwrap.
-	signer, err := keys.NewSigner(ctx, wrapped)
-	if err != nil {
-		return nil, err
-	}
-
-	switch key := signer.(type) {
-	case *ecdsa.PrivateKey:
-		return NewVRFSigner(key)
-	default:
-		return nil, fmt.Errorf("NewSigner().type: %T, want ecdsa.PrivateKey", key)
-	}
+	return true
 }
 
 // NewVRFSigner creates a signer object from a private key.
-func NewVRFSigner(key *ecdsa.PrivateKey) (vrf.PrivateKey, error) {
+func NewVRFSigner(key *ecdsa.PrivateKey) (*PrivateKey, error) {
 	if *(key.Params()) != *curve.Params() {
 		return nil, ErrPointNotOnCurve
 	}
@@ -252,7 +227,7 @@ func (k PrivateKey) Public() crypto.PublicKey {
 }
 
 // NewVRFVerifier creates a verifier object from a public key.
-func NewVRFVerifier(pubkey *ecdsa.PublicKey) (vrf.PublicKey, error) {
+func NewVRFVerifier(pubkey *ecdsa.PublicKey) (*PublicKey, error) {
 	if *(pubkey.Params()) != *curve.Params() {
 		return nil, ErrPointNotOnCurve
 	}
@@ -263,7 +238,7 @@ func NewVRFVerifier(pubkey *ecdsa.PublicKey) (vrf.PublicKey, error) {
 }
 
 // NewVRFSignerFromPEM creates a vrf private key from a PEM data structure.
-func NewVRFSignerFromPEM(b []byte) (vrf.PrivateKey, error) {
+func NewVRFSignerFromPEM(b []byte) (*PrivateKey, error) {
 	p, _ := pem.Decode(b)
 	if p == nil {
 		return nil, ErrNoPEMFound
@@ -272,7 +247,7 @@ func NewVRFSignerFromPEM(b []byte) (vrf.PrivateKey, error) {
 }
 
 // NewVRFSignerFromRawKey returns the private key from a raw private key bytes.
-func NewVRFSignerFromRawKey(b []byte) (vrf.PrivateKey, error) {
+func NewVRFSignerFromRawKey(b []byte) (*PrivateKey, error) {
 	k, err := x509.ParseECPrivateKey(b)
 	if err != nil {
 		return nil, err
@@ -281,7 +256,7 @@ func NewVRFSignerFromRawKey(b []byte) (vrf.PrivateKey, error) {
 }
 
 // NewVRFVerifierFromPEM creates a vrf public key from a PEM data structure.
-func NewVRFVerifierFromPEM(b []byte) (vrf.PublicKey, error) {
+func NewVRFVerifierFromPEM(b []byte) (*PublicKey, error) {
 	p, _ := pem.Decode(b)
 	if p == nil {
 		return nil, ErrNoPEMFound
@@ -290,7 +265,7 @@ func NewVRFVerifierFromPEM(b []byte) (vrf.PublicKey, error) {
 }
 
 // NewVRFVerifierFromRawKey returns the public key from a raw public key bytes.
-func NewVRFVerifierFromRawKey(b []byte) (vrf.PublicKey, error) {
+func NewVRFVerifierFromRawKey(b []byte) (*PublicKey, error) {
 	k, err := x509.ParsePKIXPublicKey(b)
 	if err != nil {
 		return nil, err
